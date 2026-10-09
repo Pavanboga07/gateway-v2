@@ -191,14 +191,16 @@ extras:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install "nexus-v2 @ git+https://github.com/Pavanboga07/Nexus-V2.git@<pinned-sha>" --no-deps
+pip install "nexus-v2 @ git+https://github.com/Pavanboga07/Nexus-V2.git@573c1a82e831371c653afe9e7102bb8a437c040a" --no-deps
 pip install -e ".[test]"
 python -m pytest tests/ -q
 ```
 
-`<pinned-sha>` is the audited Nexus commit currently carrying the
-protocol/identity modules (advance it only when those two modules
-change, and re-run both suites). `--no-deps` is intentional: it keeps
+The pinned SHA above is the audited Nexus commit carrying the
+protocol/identity modules (`573c1a8` on
+`fix/gateway-client-integration`). Advance it only when those two
+modules change, and re-run both suites. `--no-deps` is intentional:
+it keeps
 the gateway environment free of the application's
 LangGraph/MCP/persistence stack, which nothing here imports (the
 client-side guard test `test_client_has_clean_dependencies` pins the
