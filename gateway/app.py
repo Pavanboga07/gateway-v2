@@ -29,7 +29,8 @@ from backend.identity.replay import ReplayRegistry
 
 from .buffering import MessageBuffer
 from .connections import ConnectionRegistry, RateLimiter, verify_handshake
-from .delivery import TransportOutcome, process_transport_message
+from .delivery import TransportOutcome, extract_envelope_ids
+from .delivery import process_transport_message
 from .errors import AuthenticationError, HandshakeError, error_frame
 from .models import ConnectionState, DeliveryStatus, GatewayConfig
 
@@ -236,10 +237,8 @@ class GatewayServer:
                     )
                     continue
                 if frame.get("type") != "MESSAGE":
-                    await self._send(
-                        transport,
-                        {"type": "ERROR", "code": "UNKNOWN_FRAME",
-                         "message": "unknown frame type"},
+                    await self._send_unknown_frame(
+                        transport, frame,
                     )
                     continue
                 await self._handle_message_frame(
@@ -248,6 +247,36 @@ class GatewayServer:
         finally:
             if agent_id is not None and connection_id is not None:
                 self.registry.unregister(agent_id, connection_id)
+
+    async def _send_unknown_frame(
+        self, transport: Any, frame: dict[str, Any]
+    ) -> None:
+        """Answer a non-MESSAGE frame: correlated FAILED ack if possible.
+
+        When the frame carries a ``message`` envelope with extractable
+        ids, the sender gets a terminal FAILED ack addressed to its
+        exact pending waiter (status FAILED, never success) instead of
+        an uncorrelated ERROR that would leave the waiter to time out.
+        Frames with no recoverable id keep the previous ERROR reply.
+        """
+        message_id, request_id = extract_envelope_ids(frame.get("message"))
+        if message_id == "unknown":
+            await self._send(
+                transport,
+                {"type": "ERROR", "code": "UNKNOWN_FRAME",
+                 "message": "unknown frame type"},
+            )
+            return
+        await self._send(
+            transport,
+            {
+                "type": "ACK",
+                "message_id": message_id,
+                "request_id": request_id,
+                "status": DeliveryStatus.FAILED.value,
+                "detail": "UNKNOWN_FRAME: unknown frame type",
+            },
+        )
 
     async def _handle_message_frame(
         self, frame: dict[str, Any], agent_id: str, info: Any, transport: Any

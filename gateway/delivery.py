@@ -32,6 +32,7 @@ from backend.protocol.serialization import (
     message_to_dict,
 )
 from backend.protocol.validation import ProtocolValidationError
+from backend.protocol.types import is_valid_message_id, is_valid_request_id
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
@@ -41,6 +42,35 @@ from .connections import ConnectionRegistry, RateLimiter
 from .errors import BufferFullError
 from .models import ConnectionInfo, DeliveryAck, DeliveryStatus, GatewayConfig
 from .routing import RecipientState, check_sender_binding, resolve_recipient
+
+
+def extract_envelope_ids(envelope: Any) -> tuple[str, str]:
+    """Best-effort ``(message_id, request_id)`` for failure correlation.
+
+    Returns each id when present as a valid protocol id string, else
+    ``"unknown"`` for that slot independently. The values only address
+    a FAILED ack to the sender's pending waiter: the ack detail still
+    reports the real failure code, and no success is ever synthesized
+    from them. Format validation keeps a forged or garbage id from
+    resolving a waiter that never belonged to it.
+    """
+    if isinstance(envelope, dict):
+        raw_message_id = envelope.get("message_id")
+        raw_request_id = envelope.get("request_id")
+        message_id = (
+            raw_message_id
+            if is_valid_message_id(raw_message_id)
+            else "unknown"
+        )
+        request_id = (
+            raw_request_id
+            if is_valid_request_id(raw_request_id)
+            else "unknown"
+        )
+        assert isinstance(message_id, str)
+        assert isinstance(request_id, str)
+        return message_id, request_id
+    return "unknown", "unknown"
 
 
 @dataclass(frozen=True)
@@ -92,11 +122,12 @@ def process_transport_message(
 ) -> TransportOutcome:
     """Run the ten-step transport pipeline for one sender frame."""
     if limiter is not None and not limiter.allow(mono_now):
-        return _fail("unknown", "unknown", "RATE_LIMITED",
-                      "connection messaging boundary exceeded")
+        message_id, request_id = extract_envelope_ids(envelope)
+        return _fail(message_id, request_id, "RATE_LIMITED",
+                     "connection messaging boundary exceeded")
     if not isinstance(envelope, dict):
         return _fail("unknown", "unknown", "INVALID_MESSAGE",
-                      "message must be a JSON object")
+                     "message must be a JSON object")
     try:
         size = len(
             json.dumps(
@@ -105,15 +136,18 @@ def process_transport_message(
             ).encode("utf-8")
         )
     except (TypeError, ValueError):
-        return _fail("unknown", "unknown", "INVALID_MESSAGE",
-                      "message is not JSON serializable")
+        message_id, request_id = extract_envelope_ids(envelope)
+        return _fail(message_id, request_id, "INVALID_MESSAGE",
+                     "message is not JSON serializable")
     if size > config.max_message_size:
-        return _fail("unknown", "unknown", "MESSAGE_TOO_LARGE",
-                      f"limit is {config.max_message_size} bytes")
+        message_id, request_id = extract_envelope_ids(envelope)
+        return _fail(message_id, request_id, "MESSAGE_TOO_LARGE",
+                     f"limit is {config.max_message_size} bytes")
     try:
         message = message_from_dict(envelope)
     except ProtocolSerializationError as exc:
-        return _fail("unknown", "unknown", "INVALID_MESSAGE", str(exc))
+        message_id, request_id = extract_envelope_ids(envelope)
+        return _fail(message_id, request_id, "INVALID_MESSAGE", str(exc))
     try:
         check_sender_binding(message.sender, connection.agent_id)
     except SenderMismatchError as exc:

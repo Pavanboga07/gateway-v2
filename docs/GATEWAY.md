@@ -107,8 +107,15 @@ timestamps, version, or signature.
 ## Size limits
 
 1 MiB per message frame by default (`GatewayConfig.max_message_size`),
-enforced on raw frames (connection dropped on violation) and inside the
-pipeline (explicit FAILED ack). No chunking/streaming yet.
+measured as canonical-JSON UTF-8 bytes of the inner message envelope
+(the same expression clients use for their sender-side check), plus an
+8 KiB headroom on the raw socket frame for the outer `MESSAGE` wrapper.
+Oversize inner envelopes get an explicit FAILED ack
+(`MESSAGE_TOO_LARGE`, carrying the sender's own ids when recoverable);
+only frames exceeding the raw socket limit are dropped at the
+transport level. Compliant Nexus clients enforce the same limit before
+transmitting, so a well-behaved sender never triggers either path. No
+chunking/streaming yet.
 
 ## Rate limits
 
@@ -121,7 +128,15 @@ or distributed machinery.
 Unauthenticated sends, bad handshakes, malformed/invalid/expired/
 replayed/spoofed messages, unknown recipients, offline recipients,
 full buffers, send failures, and stale connections each have an
-explicit outcome. Stale (long-idle) connections are swept; unregister
+explicit outcome. Every MESSAGE rejection is answered with exactly one
+FAILED ack addressed to the sender's own ids whenever they can be
+safely extracted from the frame (`RATE_LIMITED`, `MESSAGE_TOO_LARGE`,
+`INVALID_MESSAGE` and post-parse failures all correlate); frames so
+malformed that no id is recoverable keep a bare ERROR reply and the
+sender falls back to its bounded ack timeout — never a false success.
+A non-MESSAGE frame carrying a message envelope likewise receives a
+correlated FAILED ack (`UNKNOWN_FRAME`) instead of an uncorrelated
+ERROR. Stale (long-idle) connections are swept; unregister
 is connection-id-guarded so a dying handler never evicts a reconnect.
 
 While the server runs, a lightweight janitor task wakes every
@@ -162,3 +177,32 @@ execution, no response generation, no request lifecycle, no approvals,
 no capability policy, no REST, no frontend, no database, no queues.
 Run one process with `python -m gateway.app` (defaults localhost:8765);
 tests use `GatewayServer` in-process (`python -m pytest tests/`).
+
+## Standalone setup and testing
+
+The gateway's only shared definitions are the Nexus protocol and
+identity modules (`backend.protocol`, `backend.identity`: stdlib plus
+`cryptography`, no LLM/MCP stack). They stay authoritative in the
+Nexus application repository; this repository never copies them. The
+Nexus distribution declares explicit namespace packaging
+(`backend*`), so it installs cleanly and this gateway consumes it as
+an explicit version-pinned dependency without the application's heavy
+extras:
+
+```bash
+python -m venv .venv && . .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install "nexus-v2 @ git+https://github.com/Pavanboga07/Nexus-V2.git@<pinned-sha>" --no-deps
+pip install -e ".[test]"
+python -m pytest tests/ -q
+```
+
+`<pinned-sha>` is the audited Nexus commit currently carrying the
+protocol/identity modules (advance it only when those two modules
+change, and re-run both suites). `--no-deps` is intentional: it keeps
+the gateway environment free of the application's
+LangGraph/MCP/persistence stack, which nothing here imports (the
+client-side guard test `test_client_has_clean_dependencies` pins the
+same boundary on the Nexus side). Until those two modules are
+extracted into their own published distribution (the narrowest safe
+follow-up, requiring cross-repo authorization), do not replace this
+with an undocumented `PYTHONPATH` pointing at a local checkout.

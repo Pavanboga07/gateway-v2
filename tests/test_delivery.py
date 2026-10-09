@@ -250,3 +250,85 @@ def test_acceptance_immutable_against_caller_mutation():
     assert buffered.ack.status is DeliveryStatus.BUFFERED
     stored, _ = world.buffer.drain_eligible(bob.agent_id, NOW)
     assert stored[0]["payload"]["query"].startswith("What projects")
+
+
+def test_rate_limited_ack_carries_real_ids():
+    alice, bob = create_identity(), create_identity()
+    world = _World(alice, bob)
+    limiter = RateLimiter(1, 60.0)
+    first = world.process(_envelope(alice, bob.agent_id, "r1"), alice,
+                          limiter=limiter, mono_now=500.0)
+    assert first.accepted is True
+    second = world.process(_envelope(alice, bob.agent_id, "r2"), alice,
+                           limiter=limiter, mono_now=500.0)
+    assert second.accepted is False
+    assert second.ack.detail.startswith("RATE_LIMITED")
+    assert second.ack.message_id == "r2"
+    assert second.ack.request_id == "req_123"
+
+
+def test_oversized_ack_carries_real_ids():
+    alice, bob = create_identity(), create_identity()
+    world = _World(alice, bob,
+                   config=GatewayConfig(max_message_size=256))
+    envelope = _envelope(alice, bob.agent_id, "big_1")
+    outcome = world.process(envelope, alice)
+    assert outcome.accepted is False
+    assert outcome.ack.detail.startswith("MESSAGE_TOO_LARGE")
+    assert outcome.ack.message_id == "big_1"
+    assert outcome.ack.request_id == "req_123"
+
+
+def test_malformed_envelope_ack_carries_raw_ids():
+    alice, bob = create_identity(), create_identity()
+    world = _World(alice, bob)
+    envelope = _envelope(alice, bob.agent_id, "bad_1")
+    del envelope["payload"]
+    outcome = world.process(envelope, alice)
+    assert outcome.accepted is False
+    assert outcome.ack.detail.startswith("INVALID_MESSAGE")
+    assert outcome.ack.message_id == "bad_1"
+    assert outcome.ack.request_id == "req_123"
+
+
+def test_non_dict_envelope_ack_stays_unknown():
+    alice, bob = create_identity(), create_identity()
+    world = _World(alice, bob)
+    outcome = world.process(["not", "a", "dict"], alice)
+    assert outcome.accepted is False
+    assert outcome.ack.detail.startswith("INVALID_MESSAGE")
+    assert outcome.ack.message_id == "unknown"
+    assert outcome.ack.request_id == "unknown"
+
+
+def test_non_serializable_dict_ack_carries_ids():
+    alice, bob = create_identity(), create_identity()
+    world = _World(alice, bob)
+    envelope = _envelope(alice, bob.agent_id, "weird_1")
+    envelope["payload"] = {"query": {"not": "a string"}}
+    envelope["nonsense"] = object()
+    outcome = world.process(envelope, alice)
+    assert outcome.accepted is False
+    assert outcome.ack.detail.startswith("INVALID_MESSAGE")
+    assert outcome.ack.message_id == "weird_1"
+    assert outcome.ack.request_id == "req_123"
+
+
+def test_extract_envelope_ids_rejects_garbage():
+    from gateway.delivery import extract_envelope_ids
+
+    assert extract_envelope_ids(None) == ("unknown", "unknown")
+    assert extract_envelope_ids(["x"]) == ("unknown", "unknown")
+    assert extract_envelope_ids({}) == ("unknown", "unknown")
+    assert extract_envelope_ids(
+        {"message_id": "", "request_id": "req_123"}
+    ) == ("unknown", "req_123")
+    assert extract_envelope_ids(
+        {"message_id": "msg_ok", "request_id": "req_ok"}
+    ) == ("msg_ok", "req_ok")
+    # Well-formed but garbage ids must not resolve someone's waiter.
+    assert extract_envelope_ids(
+        {"message_id": "!!!", "request_id": "req_ok"}
+    ) == ("unknown", "req_ok")
+    assert extract_envelope_ids({"message_id": "msg_ok"}) == (
+        "msg_ok", "unknown")

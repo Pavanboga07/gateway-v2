@@ -32,3 +32,7 @@ python -m gateway.app --host 127.0.0.1 --port 8765
 ```bash
 pytest
 ```
+
+Standalone (no Nexus checkout on `PYTHONPATH`): install the pinned
+Nexus protocol/identity modules first, then the test extras — see
+"Standalone setup and testing" in `docs/GATEWAY.md`.
