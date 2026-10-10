@@ -23,13 +23,49 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from websockets.asyncio.server import serve
+from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
 from backend.identity.replay import ReplayRegistry
 
+#: Plain-HTTP health endpoint served on the same port as the WebSocket
+#: listener (hosting platforms probe HTTP even though this process
+#: speaks WebSocket). Only this exact path is answered; every other
+#: request — including WebSocket upgrades — falls through untouched.
+HEALTHZ_PATH = "/healthz"
+
+_HEALTHZ_BODY = b'{"status":"ok","service":"nexus-gateway"}'
+
+
+async def health_check(
+    connection: Any, request: Request
+) -> Response | None:
+    """Answer ``GET /healthz`` with 200 JSON; ignore everything else.
+
+    Returning a ``Response`` short-circuits the handshake with a plain
+    HTTP reply. Returning ``None`` lets the WebSocket handshake proceed
+    normally, so A2A traffic is unaffected. Only the exact path is
+    matched (query strings stripped); the body is fixed and carries no
+    state, credentials, or message content.
+    """
+    if request.path.split("?", 1)[0] != HEALTHZ_PATH:
+        return None
+    return Response(
+        status_code=200,
+        reason_phrase="OK",
+        headers=Headers({
+            "Content-Type": "application/json",
+            "Content-Length": str(len(_HEALTHZ_BODY)),
+            "Cache-Control": "no-store",
+        }),
+        body=_HEALTHZ_BODY,
+    )
+
 from .buffering import MessageBuffer
 from .connections import ConnectionRegistry, RateLimiter, verify_handshake
-from .delivery import TransportOutcome, process_transport_message
+from .delivery import TransportOutcome, extract_envelope_ids
+from .delivery import process_transport_message
 from .errors import AuthenticationError, HandshakeError, error_frame
 from .models import ConnectionState, DeliveryStatus, GatewayConfig
 
@@ -72,6 +108,7 @@ class GatewayServer:
             self._host,
             self._port,
             max_size=self.config.max_message_size + 8192,
+            process_request=health_check,
         )
         sockets = getattr(self._server, "sockets", None) or []
         if sockets:
@@ -236,10 +273,8 @@ class GatewayServer:
                     )
                     continue
                 if frame.get("type") != "MESSAGE":
-                    await self._send(
-                        transport,
-                        {"type": "ERROR", "code": "UNKNOWN_FRAME",
-                         "message": "unknown frame type"},
+                    await self._send_unknown_frame(
+                        transport, frame,
                     )
                     continue
                 await self._handle_message_frame(
@@ -248,6 +283,36 @@ class GatewayServer:
         finally:
             if agent_id is not None and connection_id is not None:
                 self.registry.unregister(agent_id, connection_id)
+
+    async def _send_unknown_frame(
+        self, transport: Any, frame: dict[str, Any]
+    ) -> None:
+        """Answer a non-MESSAGE frame: correlated FAILED ack if possible.
+
+        When the frame carries a ``message`` envelope with extractable
+        ids, the sender gets a terminal FAILED ack addressed to its
+        exact pending waiter (status FAILED, never success) instead of
+        an uncorrelated ERROR that would leave the waiter to time out.
+        Frames with no recoverable id keep the previous ERROR reply.
+        """
+        message_id, request_id = extract_envelope_ids(frame.get("message"))
+        if message_id == "unknown":
+            await self._send(
+                transport,
+                {"type": "ERROR", "code": "UNKNOWN_FRAME",
+                 "message": "unknown frame type"},
+            )
+            return
+        await self._send(
+            transport,
+            {
+                "type": "ACK",
+                "message_id": message_id,
+                "request_id": request_id,
+                "status": DeliveryStatus.FAILED.value,
+                "detail": "UNKNOWN_FRAME: unknown frame type",
+            },
+        )
 
     async def _handle_message_frame(
         self, frame: dict[str, Any], agent_id: str, info: Any, transport: Any

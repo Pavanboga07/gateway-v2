@@ -24,11 +24,21 @@ In accordance with Nexus Version 2 architectural rules:
 ## Running the Gateway
 
 ```bash
-python -m gateway.app --host 127.0.0.1 --port 8765
+python -m gateway --host 127.0.0.1 --port 8765
 ```
+
+(`python -m gateway.app` still works but re-executes the module after
+the package import; prefer `python -m gateway` or the `nexus-gateway`
+console script. The server also answers `GET /healthz` with 200 JSON
+on the same port for host health probes; see "Render deployment"
+in `docs/GATEWAY.md`.)
 
 ## Testing
 
 ```bash
 pytest
 ```
+
+Standalone (no Nexus checkout on `PYTHONPATH`): install the pinned
+Nexus protocol/identity modules first, then the test extras — see
+"Standalone setup and testing" in `docs/GATEWAY.md`.

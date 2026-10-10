@@ -407,3 +407,140 @@ async def test_janitor_runs_periodically():
         await ws.close()
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_unknown_frame_with_id_gets_correlated_failed_ack():
+    server, url = await _started_server()
+    try:
+        alice, bob = create_identity(), create_identity()
+        ws = await _connect(url, alice)
+        try:
+            envelope = _signed_envelope(
+                alice, bob.agent_id, utcnow(),
+                message_id="msg_uf1", query="unused",
+            )
+            await ws.send(json.dumps({
+                "type": "PING",
+                "message": envelope,
+            }))
+            reply = await _next(ws)
+            assert reply["type"] == "ACK"
+            assert reply["message_id"] == "msg_uf1"
+            assert reply["request_id"] == envelope["request_id"]
+            assert reply["status"] == "FAILED"
+            assert reply["detail"].startswith("UNKNOWN_FRAME")
+            # The connection stays usable after the rejection.
+            live = _signed_envelope(alice, bob.agent_id, utcnow())
+            await ws.send(
+                json.dumps({"type": "MESSAGE", "message": live})
+            )
+            assert (await _next(ws))["status"] == "BUFFERED"
+        finally:
+            await ws.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_unknown_frame_without_id_gets_error():
+    server, url = await _started_server()
+    try:
+        alice = create_identity()
+        ws = await _connect(url, alice)
+        try:
+            await ws.send(json.dumps({"type": "PING"}))
+            reply = await _next(ws)
+            assert reply["type"] == "ERROR"
+            assert reply["code"] == "UNKNOWN_FRAME"
+            assert "message_id" not in reply
+        finally:
+            await ws.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_frame_gets_error():
+    server, url = await _started_server()
+    try:
+        alice = create_identity()
+        ws = await _connect(url, alice)
+        try:
+            await ws.send("{not json")
+            reply = await _next(ws)
+            assert reply["type"] == "ERROR"
+            assert reply["code"] == "MALFORMED_FRAME"
+        finally:
+            await ws.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_oversized_message_ack_carries_real_id():
+    import json as _json
+
+    from gateway.models import GatewayConfig
+
+    server = GatewayServer(
+        "127.0.0.1", 0, GatewayConfig(max_message_size=4096)
+    )
+    await server.start()
+    try:
+        alice, bob = create_identity(), create_identity()
+        ws = await _connect(f"ws://127.0.0.1:{server.port}", alice)
+        try:
+            envelope = _signed_envelope(
+                alice, bob.agent_id, utcnow(),
+                message_id="msg_big1", query="x" * 8192,
+            )
+            inner = len(_json.dumps(
+                envelope, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            assert inner > 4096
+            await ws.send(_json.dumps(
+                {"type": "MESSAGE", "message": envelope}))
+            ack = await _next(ws)
+            assert ack["type"] == "ACK"
+            assert ack["message_id"] == "msg_big1"
+            assert ack["status"] == "FAILED"
+            assert ack["detail"].startswith("MESSAGE_TOO_LARGE")
+        finally:
+            await ws.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_ack_carries_real_id():
+    from gateway.models import GatewayConfig
+
+    server = GatewayServer(
+        "127.0.0.1", 0,
+        GatewayConfig(rate_limit_max=1, rate_limit_window_s=60.0),
+    )
+    await server.start()
+    try:
+        alice, bob = create_identity(), create_identity()
+        ws = await _connect(f"ws://127.0.0.1:{server.port}", alice)
+        try:
+            first = _signed_envelope(
+                alice, bob.agent_id, utcnow(), message_id="msg_rl1")
+            await ws.send(json.dumps(
+                {"type": "MESSAGE", "message": first}))
+            assert (await _next(ws))["status"] == "BUFFERED"
+            second = _signed_envelope(
+                alice, bob.agent_id, utcnow(), message_id="msg_rl2")
+            await ws.send(json.dumps(
+                {"type": "MESSAGE", "message": second}))
+            ack = await _next(ws)
+            assert ack["type"] == "ACK"
+            assert ack["message_id"] == "msg_rl2"
+            assert ack["status"] == "FAILED"
+            assert ack["detail"].startswith("RATE_LIMITED")
+        finally:
+            await ws.close()
+    finally:
+        await server.stop()
