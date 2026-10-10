@@ -23,9 +23,44 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from websockets.asyncio.server import serve
+from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
 from backend.identity.replay import ReplayRegistry
+
+#: Plain-HTTP health endpoint served on the same port as the WebSocket
+#: listener (hosting platforms probe HTTP even though this process
+#: speaks WebSocket). Only this exact path is answered; every other
+#: request — including WebSocket upgrades — falls through untouched.
+HEALTHZ_PATH = "/healthz"
+
+_HEALTHZ_BODY = b'{"status":"ok","service":"nexus-gateway"}'
+
+
+async def health_check(
+    connection: Any, request: Request
+) -> Response | None:
+    """Answer ``GET /healthz`` with 200 JSON; ignore everything else.
+
+    Returning a ``Response`` short-circuits the handshake with a plain
+    HTTP reply. Returning ``None`` lets the WebSocket handshake proceed
+    normally, so A2A traffic is unaffected. Only the exact path is
+    matched (query strings stripped); the body is fixed and carries no
+    state, credentials, or message content.
+    """
+    if request.path.split("?", 1)[0] != HEALTHZ_PATH:
+        return None
+    return Response(
+        status_code=200,
+        reason_phrase="OK",
+        headers=Headers({
+            "Content-Type": "application/json",
+            "Content-Length": str(len(_HEALTHZ_BODY)),
+            "Cache-Control": "no-store",
+        }),
+        body=_HEALTHZ_BODY,
+    )
 
 from .buffering import MessageBuffer
 from .connections import ConnectionRegistry, RateLimiter, verify_handshake
@@ -73,6 +108,7 @@ class GatewayServer:
             self._host,
             self._port,
             max_size=self.config.max_message_size + 8192,
+            process_request=health_check,
         )
         sockets = getattr(self._server, "sockets", None) or []
         if sockets:

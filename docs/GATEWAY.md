@@ -175,8 +175,33 @@ Gateway ──DELIVER(buffered, unchanged ids)──▶ Agent B
 No LLM/LangGraph/LangChain/MCP calls, no user data access, no tool
 execution, no response generation, no request lifecycle, no approvals,
 no capability policy, no REST, no frontend, no database, no queues.
-Run one process with `python -m gateway.app` (defaults localhost:8765);
+Run one process with `python -m gateway` (defaults localhost:8765);
 tests use `GatewayServer` in-process (`python -m pytest tests/`).
+
+## Render deployment
+
+The same process serves plain HTTP health on the WebSocket port:
+`GET /healthz` answers `200 {"status":"ok","service":"nexus-gateway"}`
+via the `process_request` hook, without touching the A2A path. Deploy
+as a Web Service from `render.yaml` (branch pinned there):
+
+- Build: pinned `nexus-v2` protocol/identity modules `--no-deps`,
+  then `pip install -e .`
+- Start: `python -m gateway --host 0.0.0.0 --port $PORT`
+  (bind `0.0.0.0`: the `127.0.0.1` default is unreachable from the
+  Render proxy and the deploy will hang).
+- Health Check Path: `/healthz` (leave HTTP checks on this path;
+  the server has no other HTTP surface).
+- TLS terminates at Render's proxy: agents connect with
+  `wss://<service>.onrender.com`. The Ed25519 handshake still runs
+  end-to-end inside the tunnel.
+
+Hosting notes (not code gaps, but deployment facts): the free plan
+sleeps after idle, and every restart loses buffered mail, connections,
+and replay state (AT-MOST-ONCE, in-memory by design). Non-`GET`
+probes (e.g. `HEAD /`) are rejected by the vendored HTTP parser
+before our code runs — logged handshake noise, no A2A impact, and the
+server keeps serving afterwards.
 
 ## Standalone setup and testing
 

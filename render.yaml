@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: nexus-gateway
+    runtime: python
+    plan: free
+    branch: fix/gateway-render-compat
+    buildCommand: pip install "nexus-v2 @ git+https://github.com/Pavanboga07/Nexus-V2.git@573c1a82e831371c653afe9e7102bb8a437c040a" --no-deps && pip install -e .
+    startCommand: python -m gateway --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
