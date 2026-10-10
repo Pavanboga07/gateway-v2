@@ -33,6 +33,30 @@ console script. The server also answers `GET /healthz` with 200 JSON
 on the same port for host health probes; see "Render deployment"
 in `docs/GATEWAY.md`.)
 
+## Keeping the Render deployment warm
+
+Render suspends free web services after ~15 minutes without inbound
+traffic, and every suspend wipes the Gateway's in-memory state
+(connections, replay guards, and buffered mail for offline agents).
+No code deployed *on* the service can prevent that — a suspended
+process runs nothing — so the fix pings the public `/healthz`
+endpoint from the *outside* on a schedule:
+
+- `.github/workflows/keepalive.yml` runs every 10 minutes (inside
+  the idle window, with margin for one missed tick) plus on demand
+  (`workflow_dispatch`). It fails loudly when the Gateway does not
+  answer, so a real outage pages you instead of hiding behind a nap.
+- `scripts/keepalive.sh` holds the retry logic; run it locally or
+  from any cron with `scripts/keepalive.sh <public-url>`.
+
+Setup: the workflow pings `https://gateway-v2-ub7w.onrender.com` by
+default; set an Actions repository Variable named
+`RENDER_GATEWAY_URL` to point it elsewhere. Scheduled workflows run
+from the default branch, so merge this to `main` for the pings to
+start. No secrets involved: `/healthz` is public and
+unauthenticated. (On a paid Render plan with sleep disabled, delete
+the workflow — it becomes a no-op health log.)
+
 ## Testing
 
 ```bash

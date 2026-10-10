@@ -1,0 +1,35 @@
+# Keep the Render free-tier Gateway warm.
+#
+# Background: Render suspends free web services after ~15 minutes
+# without inbound traffic. No code deployed ON the service can stop
+# that (suspension stops the process itself), so this workflow pings
+# the public /healthz endpoint from the OUTSIDE every 10 minutes.
+# Cold starts can still happen if several runs in a row fail — the
+# workflow then goes red, which is the signal to look, not silence.
+#
+# Configuration: set an Actions repository Variable named
+# RENDER_GATEWAY_URL (e.g. https://nexus-gateway-xxxx.onrender.com)
+# to override the default below. No secrets are involved: /healthz
+# is the public, unauthenticated health surface.
+
+name: keepalive
+
+on:
+  schedule:
+    # Every 10 minutes: comfortably inside Render's ~15 minute idle
+    # window, with margin for one missed tick.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GATEWAY_URL: ${{ vars.RENDER_GATEWAY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ping /healthz until warm
+        run: |
+          URL="${GATEWAY_URL:-https://gateway-v2-ub7w.onrender.com}"
+          bash scripts/keepalive.sh "$URL"
