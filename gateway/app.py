@@ -31,36 +31,55 @@ from backend.identity.replay import ReplayRegistry
 
 #: Plain-HTTP health endpoint served on the same port as the WebSocket
 #: listener (hosting platforms probe HTTP even though this process
-#: speaks WebSocket). Only this exact path is answered; every other
-#: request — including WebSocket upgrades — falls through untouched.
+#: speaks WebSocket).
 HEALTHZ_PATH = "/healthz"
 
 _HEALTHZ_BODY = b'{"status":"ok","service":"nexus-gateway"}'
+_NOT_FOUND_BODY = b'{"code":"NOT_FOUND","message":"not a gateway route"}'
 
 
-async def health_check(
-    connection: Any, request: Request
-) -> Response | None:
-    """Answer ``GET /healthz`` with 200 JSON; ignore everything else.
-
-    Returning a ``Response`` short-circuits the handshake with a plain
-    HTTP reply. Returning ``None`` lets the WebSocket handshake proceed
-    normally, so A2A traffic is unaffected. Only the exact path is
-    matched (query strings stripped); the body is fixed and carries no
-    state, credentials, or message content.
-    """
-    if request.path.split("?", 1)[0] != HEALTHZ_PATH:
-        return None
+def _plain_response(status_code, reason, body):
     return Response(
-        status_code=200,
-        reason_phrase="OK",
+        status_code=status_code,
+        reason_phrase=reason,
         headers=Headers({
             "Content-Type": "application/json",
-            "Content-Length": str(len(_HEALTHZ_BODY)),
+            "Content-Length": str(len(body)),
             "Cache-Control": "no-store",
         }),
-        body=_HEALTHZ_BODY,
+        body=body,
     )
+
+
+async def handle_http_request(
+    connection: Any, request: Request
+) -> Response | None:
+    """Route plain-HTTP traffic; leave WebSocket upgrades untouched.
+
+    - ``/healthz`` (any method) answers 200 JSON. ``HEAD`` gets the
+      same status with an empty body, since a HEAD response must not
+      carry one.
+    - Any other request *without* a WebSocket upgrade answers 404
+      JSON. This is what internet scanners and misconfigured probes
+      hit: a clean answer instead of a handshake traceback, with no
+      A2A message fabricated and no connection registered.
+    - Requests carrying ``Upgrade: websocket`` return ``None`` so the
+      normal handshake (and its authentication) proceeds unchanged.
+
+    ``request.method`` exists on websockets 17+; the ``getattr``
+    fallback keeps this working on 16.x, where non-GET requests never
+    reach this hook at all.
+    """
+    path = request.path.split("?", 1)[0]
+    head_only = getattr(request, "method", "GET").upper() == "HEAD"
+    if path == HEALTHZ_PATH:
+        return _plain_response(
+            200, "OK", b"" if head_only else _HEALTHZ_BODY)
+    upgrade = request.headers.get("Upgrade", "")
+    if upgrade.lower() != "websocket":
+        return _plain_response(
+            404, "Not Found", b"" if head_only else _NOT_FOUND_BODY)
+    return None
 
 from .buffering import MessageBuffer
 from .connections import ConnectionRegistry, RateLimiter, verify_handshake
@@ -108,7 +127,7 @@ class GatewayServer:
             self._host,
             self._port,
             max_size=self.config.max_message_size + 8192,
-            process_request=health_check,
+            process_request=handle_http_request,
         )
         sockets = getattr(self._server, "sockets", None) or []
         if sockets:

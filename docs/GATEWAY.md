@@ -196,12 +196,13 @@ as a Web Service from `render.yaml` (branch pinned there):
   `wss://<service>.onrender.com`. The Ed25519 handshake still runs
   end-to-end inside the tunnel.
 
-Hosting notes (not code gaps, but deployment facts): the free plan
-sleeps after idle, and every restart loses buffered mail, connections,
-and replay state (AT-MOST-ONCE, in-memory by design). Non-`GET`
-probes (e.g. `HEAD /`) are rejected by the vendored HTTP parser
-before our code runs — logged handshake noise, no A2A impact, and the
-server keeps serving afterwards.
+Hosting notes: the free plan sleeps after idle, and every restart
+loses buffered mail, connections, and replay state (AT-MOST-ONCE,
+in-memory by design). Plain-HTTP probes (including `HEAD /`) get a
+clean `404` JSON answer from the same interceptor — never a handshake
+traceback and never an A2A message — while WebSocket upgrades proceed
+to authentication untouched (requires `websockets>=17`, which parses
+non-GET request lines; pinned in `pyproject.toml`).
 
 ## Standalone setup and testing
 

@@ -1,9 +1,9 @@
 """Health endpoint: plain HTTP on the WebSocket port.
 
 Render and other hosts probe HTTP even though this process speaks
-WebSocket. ``GET /healthz`` must answer 200 JSON without touching the
-A2A path; every other request — including WebSocket upgrades — must
-fall through to the normal handshake.
+WebSocket. ``/healthz`` answers 200 JSON without touching the A2A
+path; other plain-HTTP requests get a clean 404 (never a handshake
+traceback); WebSocket upgrades fall through to normal authentication.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request
 
 from backend.identity.identity import create_identity
-from gateway.app import HEALTHZ_PATH, GatewayServer, health_check
+from gateway.app import HEALTHZ_PATH, GatewayServer, handle_http_request
 
 
 def _http_get(url, method="GET", timeout=10.0):
@@ -50,21 +50,20 @@ async def test_healthz_answers_200_json():
 
 
 @pytest.mark.asyncio
-async def test_head_probe_does_not_harm_server():
-    # websockets 16.1 parses only GET at the HTTP layer, so HEAD dies
-    # inside the library before process_request runs (logged handshake
-    # noise, connection closed, no A2A message). The server must stay
-    # up and keep serving health + WebSocket afterwards.
+async def test_head_probes_answered_cleanly():
+    # HEAD /, HEAD /healthz: clean statuses, no health-body leak on /,
+    # and the server keeps serving afterwards.
     from websockets.asyncio.client import connect as ws_connect
 
     server = GatewayServer("127.0.0.1", 0)
     port = await server.start()
     try:
-        try:
-            await _http_get_async(
-                f"http://127.0.0.1:{port}{HEALTHZ_PATH}", method="HEAD")
-        except Exception:
-            pass
+        status, _ = await _http_get_async(
+            f"http://127.0.0.1:{port}{HEALTHZ_PATH}", method="HEAD")
+        assert status == 200, status
+        status, _ = await _http_get_async(
+            f"http://127.0.0.1:{port}/", method="HEAD")
+        assert status == 404, status
         status, body = await _http_get_async(
             f"http://127.0.0.1:{port}{HEALTHZ_PATH}")
         assert status == 200, (status, body)
@@ -109,21 +108,30 @@ async def test_websocket_still_works_alongside_health():
 
 
 def test_health_check_unit_interceptor():
-    """The interceptor only answers the exact path (query stripped)."""
+    """Exact path answered; plain HTTP 404s; upgrades fall through."""
 
     async def run():
-        ok = await health_check(
+        ok = await handle_http_request(
             object(),
             Request(path="/healthz", headers=Headers({"Host": "x"})))
         assert ok is not None and ok.status_code == 200
         assert json.loads(ok.body) == {
             "status": "ok", "service": "nexus-gateway"}
-        assert await health_check(
+        plain = await handle_http_request(
             object(),
-            Request(path="/", headers=Headers({"Host": "x"}))) is None
-        assert await health_check(
+            Request(path="/", headers=Headers({"Host": "x"})))
+        assert plain is not None and plain.status_code == 404
+        assert await handle_http_request(
             object(),
             Request(path="/healthz?x=1", headers=Headers({"Host": "x"}))
         ) is not None
+        upgrade = await handle_http_request(
+            object(),
+            Request(path="/", headers=Headers({
+                "Host": "x", "Upgrade": "websocket",
+                "Connection": "Upgrade",
+            })),
+        )
+        assert upgrade is None
 
     asyncio.run(run())
